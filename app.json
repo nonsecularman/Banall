@@ -1,28 +1,31 @@
 {
-  "name": "Ban all",
+  "name": "Banall Bot",
   "description": "Power Packed Banall Within Seconds.",
-  "keywords": ["Zaid", "banall"],
   "repository": "https://github.com/ITZ-ZAID/Banall",
-  "stack": "container",
+  "keywords": ["banall", "telegram", "bot"],
+  "stack": "heroku-22",
   "env": {
     "TELEGRAM_TOKEN": {
-      "description": "Bot Token Else leave blank",
+      "description": "Enter your Bot Token from @BotFather",
       "required": true
     },
     "PYRO_SESSION": {
-      "description": "Pyrogram session",
-      "required": false,
-      "value": ""
+      "description": "Pyrogram session string (optional)",
+      "required": false
     },
     "TELEGRAM_APP_HASH": {
-      "description": "Fill Api Hash from telegram.prg",
-      "required": true,
-      "value": ""
+      "description": "Enter API HASH from https://my.telegram.org",
+      "required": true
     },
     "TELEGRAM_APP_ID": {
-      "description": "Fill Api ID from telegram.prg",
-      "required": true,
-      "value": ""
+      "description": "Enter API ID from https://my.telegram.org",
+      "required": true
+    }
+  },
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "eco"
     }
   }
 }
