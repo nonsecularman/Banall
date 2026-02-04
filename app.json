@@ -8,19 +8,6 @@
     "TELEGRAM_TOKEN": {
       "description": "Enter your Bot Token from @BotFather",
       "required": true
-    },
-    "PYRO_SESSION": {
-      "description": "Pyrogram session string (optional)",
-      "required": false
-    },
-    "TELEGRAM_APP_HASH": {
-      "description": "Enter API HASH from https://my.telegram.org",
-      "required": true
-    },
-    "TELEGRAM_APP_ID": {
-      "description": "Enter API ID from https://my.telegram.org",
-      "required": true
     }
   }
 }
-
