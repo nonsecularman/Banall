@@ -1,6 +1,6 @@
-async-lru
-pyaes
-Tgcrypto
-pyrogram==1.4.15
-PySocks
-python-dotenv
+pyrogram==2.0.106
+tgcrypto==1.2.5
+python-dotenv==0.15.0
+pyaes==1.6.1
+async-lru==1.0.2
+pysocks==1.7.1
