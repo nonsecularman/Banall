@@ -12,10 +12,11 @@ logger = logging.getLogger(__name__)
 # Memory flags for active job cancellations per chat
 CANCELLATION_REQUESTS: set[int] = set()
 
+
 async def banall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
-    if not user or not chat:
+    if not user or not chat or not update.message:
         return
 
     if not await is_authorized(user.id):
@@ -46,7 +47,7 @@ async def banall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Skipped: 0\n"
         "Errors: 0\n\n"
         "Telegram limits are being respected.",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
 
     processed = 0
@@ -55,23 +56,55 @@ async def banall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     errors = 0
 
     try:
-        # Collect available chat members safely
-        target_members = []
-        async for member in chat.get_members():
-            target_members.append(member)
+        # NOTE: Telegram Bot API has no method to enumerate every member of a
+        # group. Bots can only see chat admins via get_chat_administrators(),
+        # or check a specific known user_id via get_chat_member(). So the
+        # target list MUST come from members your bot has already seen/tracked
+        # (e.g. saved to DB on join/message events), not from a live "get all
+        # members" API call — that call does not exist.
+        target_ids = await db.get_tracked_members(chat.id)  # returns list[int]
 
+        if not target_ids:
+            await status_msg.edit_text(
+                "⚠️ No tracked members found for this chat.\n\n"
+                "This bot can't fetch a full member list from Telegram directly "
+                "(the Bot API doesn't allow it) — it can only ban users it has "
+                "already seen and stored in the database."
+            )
+            return
+
+        total = len(target_ids)
         bot_id = context.bot.id
 
-        for member in target_members:
+        for target_id in target_ids:
             if chat.id in CANCELLATION_REQUESTS:
                 logger.info(f"Ban-all process cancelled by user in chat {chat.id}")
                 break
 
             processed += 1
-            target_id = member.user.id
 
-            # Check protected users
-            if member.status in [ChatMember.ADMINISTRATOR, ChatMember.OWNER, ChatMember.BANNED] or member.user.is_deleted:
+            if target_id == bot_id or target_id == user.id:
+                skipped += 1
+                continue
+
+            # Check current status/protection before banning
+            try:
+                member = await chat.get_member(target_id)
+            except BadRequest:
+                # User already left / not a member anymore
+                skipped += 1
+                continue
+            except TelegramError as e:
+                logger.error(f"Could not fetch member {target_id}: {e}")
+                errors += 1
+                continue
+
+            if member.status in (
+                ChatMember.ADMINISTRATOR,
+                ChatMember.OWNER,
+                ChatMember.BANNED,
+                ChatMember.LEFT,
+            ) or member.user.is_deleted:
                 skipped += 1
                 continue
 
@@ -86,32 +119,31 @@ async def banall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await chat.ban_member(user_id=target_id)
                     banned += 1
                     ban_success = True
-                    # Controlled rate-limiting delay between requests
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.2)  # controlled rate-limiting delay
                 except RetryAfter as e:
-                    logger.warning(f"Telegram FloodWait encountered: Sleeping for {e.retry_after + 2}s")
+                    wait_for = e.retry_after + 2
+                    logger.warning(f"Telegram FloodWait encountered: Sleeping for {wait_for}s")
                     await db.log_action(user.id, chat.id, "FLOODWAIT", f"RetryAfter {e.retry_after}s")
-                    await asyncio.sleep(e.retry_after + 2)
+                    await asyncio.sleep(wait_for)
                 except (Forbidden, BadRequest) as e:
-                    logger.error(f"Failed to ban user {target_id}: {e.message}")
+                    logger.error(f"Failed to ban user {target_id}: {e}")
                     errors += 1
-                    ban_success = True  # Break inner retry loop on non-retriable error
+                    ban_success = True  # break inner retry loop on non-retriable error
                 except TelegramError as e:
                     logger.error(f"Telegram Error for user {target_id}: {e}")
                     errors += 1
                     ban_success = True
 
-            # Edit status message periodically
-            if processed % 25 == 0 or processed == len(target_members):
+            if processed % 25 == 0 or processed == total:
                 try:
                     await status_msg.edit_text(
                         f"🔨 **Ban-All In Progress**\n\n"
-                        f"Processed: {processed}\n"
+                        f"Processed: {processed}/{total}\n"
                         f"Banned: {banned}\n"
                         f"Skipped: {skipped}\n"
                         f"Errors: {errors}\n\n"
                         f"Telegram limits are being respected.",
-                        parse_mode="Markdown"
+                        parse_mode="Markdown",
                     )
                 except Exception:
                     pass
@@ -125,7 +157,10 @@ async def banall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         CANCELLATION_REQUESTS.discard(chat.id)
 
         header = "⏹️ **Ban-All Stopped**" if is_cancelled else "✅ **Ban-All Finished**"
-        await db.log_action(user.id, chat.id, "BANALL_END", f"Completed. Banned: {banned}, Skipped: {skipped}, Errors: {errors}")
+        await db.log_action(
+            user.id, chat.id, "BANALL_END",
+            f"Completed. Banned: {banned}, Skipped: {skipped}, Errors: {errors}",
+        )
 
         try:
             await status_msg.edit_text(
@@ -134,17 +169,18 @@ async def banall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Banned: {banned}\n"
                 f"Skipped: {skipped}\n"
                 f"Errors: {errors}",
-                parse_mode="Markdown"
+                parse_mode="Markdown",
             )
         except Exception:
             await chat.send_message(
                 f"{header}\n\nProcessed: {processed} | Banned: {banned} | Skipped: {skipped} | Errors: {errors}"
             )
 
+
 async def stopban_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
-    if not user or not chat:
+    if not user or not chat or not update.message:
         return
 
     if not await is_authorized(user.id):
