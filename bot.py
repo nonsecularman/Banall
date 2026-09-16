@@ -7,6 +7,7 @@ from database import db
 from handlers.admin import start_handler, help_handler
 from handlers.sudo import addsudo_handler, delsudo_handler, sudolist_handler
 from handlers.banall import banall_handler, stopban_handler
+from handlers.tracker import register_tracker_handlers
 
 # Configure logging without printing sensitive credentials
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -42,6 +43,9 @@ def main():
     # Moderation Action Handlers (Owner + Sudo)
     application.add_handler(CommandHandler("banall", banall_handler))
     application.add_handler(CommandHandler("stopban", stopban_handler))
+
+    # Member tracking (needed for /banall since Bot API can't list all members directly)
+    register_tracker_handlers(application)
 
     application.run_polling()
 
