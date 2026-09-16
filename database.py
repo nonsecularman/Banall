@@ -8,7 +8,11 @@ class Database:
         self.db_path = db_path
 
     async def init_db(self):
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        # Folder path nikal kar tabhi mkdir karein agar directory missing ho aur non-empty ho
+        dir_name = os.path.dirname(self.db_path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+            
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS sudo_users (
