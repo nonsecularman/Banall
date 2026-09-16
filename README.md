@@ -1,20 +1,20 @@
-# Banall bot
+# Telegram Group Moderation Bot
 
-Telegram Ban all Bot Which can Remove All members easily ...
+A production-ready Telegram group moderation bot built using Python and `python-telegram-bot` (v20+ async). Designed strictly to abide by Telegram's Bot API guidelines with FloodWait (`RetryAfter`) handling, role authorization, and graceful job controls.
 
-## Deploy
-U can Deploy Easily Fork repo and Give Started ✨
+---
 
-## ʜᴇʀᴏᴋᴜ ᴅᴇᴘʟᴏʏᴍᴇɴᴛꜱ 💜
-ʜᴇʀᴏᴋᴜ ɪꜱ ᴛʜᴇ ᴇᴀꜱʏ ᴡᴀʏ ᴛᴏ ʜᴏꜱᴛ ᴜʀ ᴀᴘᴘꜱ
+## 🔒 Required Bot Permissions
 
-[![ᴢᴠᴄ ᴅᴇᴘʟᴏʏ](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/ITZ-ZAID/Banall)
-## Note
+To execute moderation tasks in Telegram supergroups, ensure the bot is added as an **Administrator** with the following permission:
+- **Ban Users / Restrict Members** (`can_restrict_members = True`)
 
-I m Not Responsible For anything Use This Code At Own Risk And Don't Ask Me In Support Groups About This Codes..
- Enjoy 🙂
+---
 
+## 🚀 Setup Guide (Ubuntu VPS)
 
-## How to Use.
-
-That's a Simple Code Just deploy Bot then Simply make them Via searching Add new Admin Section or make directly admin with Ban Rights.
+### 1. Prerequisites & Clone
+```bash
+sudo apt update && sudo apt install -y python3 python3-venv git
+git clone [https://github.com/your-username/banall-bot.git](https://github.com/your-username/banall-bot.git)
+cd banall-bot
