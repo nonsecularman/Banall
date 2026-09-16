@@ -13,33 +13,18 @@ logger = logging.getLogger(__name__)
 CANCELLATION_REQUESTS: set[int] = set()
 
 # PTB v21.3+ me constant ka naam "OWNER" hai, purane versions me "CREATOR".
-# Dono ke saath kaam kare isliye getattr fallback:
 _OWNER_STATUS = getattr(ChatMember, "OWNER", getattr(ChatMember, "CREATOR", "creator"))
-_SKIP_STATUSES = {
-    ChatMember.ADMINISTRATOR,
-    _OWNER_STATUS,
-    ChatMember.BANNED,
-    ChatMember.LEFT,
-}
+
+# Summary me max itne hi reasons dikhayenge (Telegram 4096 char limit)
+MAX_SHOWN = 15
 
 
-async def _backfill_admins(chat, context) -> int:
-    """
-    getChatAdministrators se admins ko tracked list me add karta hai.
-    (Bot API full member list nahi deta, par admins ki list allowed hai —
-    kam se kam wo DB me aa jayenge.)
-    """
-    added = 0
-    try:
-        admins = await context.bot.get_chat_administrators(chat.id)
-        for admin in admins:
-            u = admin.user
-            if not u.is_bot:
-                await db.track_member(chat.id, u.id)
-                added += 1
-    except TelegramError as e:
-        logger.error(f"Admin backfill failed in chat {chat.id}: {e}")
-    return added
+def _mention(member) -> str:
+    """Member ka readable naam banao (username ya first_name ya id)."""
+    u = member.user
+    if u.username:
+        return f"@{u.username}"
+    return u.first_name or str(u.id)
 
 
 async def banall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -72,27 +57,19 @@ async def banall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- Target list DB se lo (Bot API "list all members" deta hi nahi) ---
     target_ids = await db.get_tracked_members(chat.id)
 
-    # List khali hai to kam-se-kam admins ko auto-backfill karo
     if not target_ids:
-        backfilled = await _backfill_admins(chat, context)
-        if backfilled:
-            target_ids = await db.get_tracked_members(chat.id)
-
-    if not target_ids:
-        # 🔴 FIX: pehle yaha return hone par finally-block "Finished 0/0/0/0"
-        # likh kar is warning ko overwrite kar deta tha — isliye lagta tha
-        # kuch hua hi nahi. Ab lock yahi release karke clean message dete hain.
+        # Lock yahi release karo, warna finally-block is message ko
+        # "Finished 0/0/0/0" se overwrite kar deta.
         await db.set_job_inactive(chat.id)
         await db.log_action(user.id, chat.id, "BANALL_END", "No tracked members found")
         await update.message.reply_text(
-            "⚠️ No tracked members found for this group.\n\n"
-            "Telegram Bot API group ka poora member list nahi deta — bot sirf "
-            "un users ko track kar sakta hai jo uske saamne message bhejte hain "
-            "ya join karte hain.\n\n"
-            "Fix:\n"
-            "1. Bot ko group me ADMIN banao (ban rights ke saath).\n"
-            "2. Kuch log normal messages bheje — DB apne aap bharega.\n"
-            "3. /trackstats chala kar dekho kitne members track hue hain."
+            "⚠️ Is group ke liye koi tracked member nahi mila.\n\n"
+            "Telegram Bot API poora member list nahi deta — bot sirf un users ko "
+            "dekh sakta hai jo bot ke saamne message bhejte hain ya join karte hain.\n\n"
+            "Kya karein:\n"
+            "1. /trackstats chalao — kitne members track hain pata chalega.\n"
+            "2. Jitne log message bhejenge / join karenge, sab DB me add honge.\n"
+            "3. Uske baad /banall chalao."
         )
         return
 
@@ -104,6 +81,8 @@ async def banall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     banned = 0
     skipped = 0
     errors = 0
+    skip_reasons: list[str] = []   # har skip ka exact reason
+    banned_list: list[str] = []    # kaun-kaun ban hua
 
     try:
         status_msg = await update.message.reply_text(
@@ -124,59 +103,112 @@ async def banall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             processed += 1
 
-            if target_id == bot_id or target_id == user.id:
+            # 1) Bot khud ko kabhi ban nahi karte
+            if target_id == bot_id:
                 skipped += 1
+                skip_reasons.append("bot khud — skip")
                 continue
 
-            # Ban karne se pehle current status check karo
+            # 2) Command chalane wala khud (tum) — skip
+            if target_id == user.id:
+                skipped += 1
+                skip_reasons.append("aap khud (command issuer) — skip")
+                continue
+
+            # 3) Ban se pehle current status check karo
             try:
                 member = await chat.get_member(target_id)
             except BadRequest:
-                # User already left / not a member anymore
                 skipped += 1
+                skip_reasons.append(f"{target_id} — group me nahi hai (left ya invalid id)")
+                logger.info(f"[BANALL] SKIP {target_id}: not in group / invalid id")
+                await db.remove_tracked_member(chat.id, target_id)
                 continue
             except TelegramError as e:
                 logger.error(f"Could not fetch member {target_id}: {e}")
                 errors += 1
+                skip_reasons.append(f"❌ {target_id} — status check fail: {type(e).__name__}")
                 continue
 
-            # 🔴 FIX: member.user.is_deleted hata diya — PTB ke User object me
-            # aisa koi attribute hai hi nahi, AttributeError phenk ke pura loop
-            # crash kar deta tha. Bots ko bhi skip karte hain.
-            if member.status in _SKIP_STATUSES or member.user.is_bot:
+            who = _mention(member)
+
+            # 4) Har status ka alag-alag clear reason — ab andaze se nahi pata chalega
+            if member.status == _OWNER_STATUS:
                 skipped += 1
+                skip_reasons.append(f"{who} — group OWNER hai (Telegram me owner ko koi bhi ban nahi kar sakta)")
+                logger.info(f"[BANALL] SKIP {target_id}: group owner")
                 continue
 
+            if member.status == ChatMember.ADMINISTRATOR:
+                skipped += 1
+                skip_reasons.append(f"{who} — ADMIN hai (bot admin ko ban nahi kar sakta)")
+                logger.info(f"[BANALL] SKIP {target_id}: admin")
+                continue
+
+            if member.status == ChatMember.BANNED:
+                skipped += 1
+                skip_reasons.append(f"{who} — pehle se banned hai")
+                logger.info(f"[BANALL] SKIP {target_id}: already banned")
+                await db.remove_tracked_member(chat.id, target_id)
+                continue
+
+            if member.status == ChatMember.LEFT:
+                skipped += 1
+                skip_reasons.append(f"{who} — group chhod chuka hai")
+                logger.info(f"[BANALL] SKIP {target_id}: left the group")
+                await db.remove_tracked_member(chat.id, target_id)
+                continue
+
+            if member.user.is_bot:
+                skipped += 1
+                skip_reasons.append(f"{who} — bot account hai")
+                logger.info(f"[BANALL] SKIP {target_id}: is a bot")
+                await db.remove_tracked_member(chat.id, target_id)
+                continue
+
+            # 5) Protected/sudo user check
             if await is_protected_user(chat.id, target_id, bot_id, context):
                 skipped += 1
+                skip_reasons.append(f"{who} — protected user hai (sudo/protected list)")
+                logger.info(f"[BANALL] SKIP {target_id}: protected user")
                 continue
 
-            # Execute ban attempt with FloodWait handling loop
+            # --- Sab checks pass: ab BAN karo (FloodWait handling ke saath) ---
             ban_success = False
             while not ban_success:
                 try:
-                    # revoke_messages=False => sirf ban, messages delete nahi hote.
-                    # (True karna ho to unke saare group messages bhi delete ho jayenge)
+                    # revoke_messages=False => sirf ban, messages delete nahi hote
                     await chat.ban_member(user_id=target_id, revoke_messages=False)
                     banned += 1
+                    banned_list.append(who)
                     ban_success = True
-                    # 🔴 FIX: ban ho chuke log ko tracked list se bhi hata do,
-                    # warna DB purane banned members ka zakhira banata rahega.
+                    # Ban ho gaya to tracked list se bhi hata do
                     await db.remove_tracked_member(chat.id, target_id)
                     await asyncio.sleep(0.2)  # controlled rate-limiting delay
                 except RetryAfter as e:
                     wait_for = e.retry_after + 2
-                    logger.warning(f"Telegram FloodWait encountered: Sleeping for {wait_for}s")
+                    logger.warning(f"Telegram FloodWait: sleeping {wait_for}s")
                     await db.log_action(user.id, chat.id, "FLOODWAIT", f"RetryAfter {e.retry_after}s")
                     await asyncio.sleep(wait_for)
-                except (Forbidden, BadRequest) as e:
-                    logger.error(f"Failed to ban user {target_id}: {e}")
-                    errors += 1
-                    ban_success = True  # non-retriable error — retry loop todo
-                except TelegramError as e:
-                    logger.error(f"Telegram Error for user {target_id}: {e}")
+                except Forbidden:
                     errors += 1
                     ban_success = True
+                    skip_reasons.append(
+                        f"❌ {who} — ban FAIL (Forbidden): bot ke paas 'Ban users' "
+                        f"permission nahi hai — bot ko admin banao with Ban rights"
+                    )
+                    logger.error(f"Failed to ban {target_id}: Forbidden (no ban rights?)")
+                except BadRequest:
+                    errors += 1
+                    ban_success = True
+                    skip_reasons.append(f"❌ {who} — ban FAIL (BadRequest): user ab group me nahi hai")
+                    await db.remove_tracked_member(chat.id, target_id)
+                    logger.error(f"Failed to ban {target_id}: BadRequest")
+                except TelegramError as e:
+                    errors += 1
+                    ban_success = True
+                    skip_reasons.append(f"❌ {who} — ban FAIL: {type(e).__name__}")
+                    logger.error(f"Telegram error banning {target_id}: {e}")
 
             if processed % 25 == 0 or processed == total:
                 try:
@@ -200,25 +232,47 @@ async def banall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_cancelled = chat.id in CANCELLATION_REQUESTS
         CANCELLATION_REQUESTS.discard(chat.id)
 
-        header = "⏹️ **Ban-All Stopped**" if is_cancelled else "✅ **Ban-All Finished**"
+        header = "⏹️ Ban-All Stopped" if is_cancelled else "✅ Ban-All Finished"
         await db.log_action(
             user.id, chat.id, "BANALL_END",
             f"Completed. Banned: {banned}, Skipped: {skipped}, Errors: {errors}",
         )
 
-        summary = (
-            f"{header}\n\n"
-            f"Targets: {total}\n"
-            f"Processed: {processed}\n"
-            f"Banned: {banned}\n"
-            f"Skipped: {skipped}\n"
-            f"Errors: {errors}"
-        )
+        # Plain text summary — user names me Markdown-breaking chars aa sakte hain
+        parts = [
+            header,
+            "",
+            f"Targets: {total}",
+            f"Processed: {processed}",
+            f"Banned: {banned}",
+            f"Skipped: {skipped}",
+            f"Errors: {errors}",
+        ]
+
+        if banned_list:
+            parts.append("")
+            parts.append("🔨 Banned:")
+            parts += [f"• {w}" for w in banned_list[:MAX_SHOWN]]
+            if len(banned_list) > MAX_SHOWN:
+                parts.append(f"• ... aur {len(banned_list) - MAX_SHOWN}")
+
+        if skip_reasons:
+            parts.append("")
+            parts.append("ℹ️ Skip reasons (har skipped target ka exact kaaran):")
+            parts += [f"• {r}" for r in skip_reasons[:MAX_SHOWN]]
+            if len(skip_reasons) > MAX_SHOWN:
+                parts.append(f"• ... aur {len(skip_reasons) - MAX_SHOWN}")
+
+        summary = "\n".join(parts)
+
         if status_msg is not None:
             try:
-                await status_msg.edit_text(summary, parse_mode="Markdown")
+                await status_msg.edit_text(summary)
             except Exception:
-                await chat.send_message(summary)
+                try:
+                    await chat.send_message(summary)
+                except Exception:
+                    pass
         else:
             try:
                 await chat.send_message(summary)
