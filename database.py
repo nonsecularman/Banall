@@ -37,6 +37,14 @@ class Database:
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS seen_members (
+                    chat_id INTEGER,
+                    user_id INTEGER,
+                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (chat_id, user_id)
+                )
+            """)
             await db.commit()
 
     async def add_sudo(self, user_id: int) -> bool:
@@ -91,6 +99,38 @@ class Database:
             await db.execute(
                 "INSERT INTO audit_logs (user_id, chat_id, action, details) VALUES (?, ?, ?, ?)",
                 (user_id, chat_id, action, details)
+            )
+            await db.commit()
+
+    # --- Member tracking (needed because Telegram Bot API has no
+    # "list all members" call — we build our own list from activity we see) ---
+
+    async def track_member(self, chat_id: int, user_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO seen_members (chat_id, user_id, last_seen)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(chat_id, user_id)
+                DO UPDATE SET last_seen = CURRENT_TIMESTAMP
+                """,
+                (chat_id, user_id),
+            )
+            await db.commit()
+
+    async def get_tracked_members(self, chat_id: int) -> list[int]:
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT user_id FROM seen_members WHERE chat_id = ?", (chat_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [row[0] for row in rows]
+
+    async def remove_tracked_member(self, chat_id: int, user_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM seen_members WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
             )
             await db.commit()
 
